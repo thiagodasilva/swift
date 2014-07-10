@@ -623,3 +623,27 @@ use = egg:swift#xprofile
 #
 # unwind the iterator of applications
 # unwind = false
+
+[filter:data-migration]
+use = egg:swift#data_migration
+
+# A dynamic list of all supported drivers.
+supported_drivers = fsystem,swift
+
+# For each driver XXX should be defined
+# driver_XXX_keys ( input parameters for the driver. This is the list of
+# required metadata headers to be set on container during data migration
+# setup process )
+# driver_XXX_module ( the class that implements driver's logic. This class
+# will be loaded dynamically during middleware initialization )
+
+# File System driver
+driver_fsystem_module = swift.common.data_migrator_drivers:FileSystemAccessDriver
+# This is mandatory parameter. Should contain root directory such that all source folders
+# will be below this root directory. Value should be set if file system driver 
+# is activated for some container.
+driver_fsystem_parent_path = 
+
+# Swift driver based on python-swiftclient (optional).
+# driver_swift_keys = token-url,user,key
+# driver_swift_module = swift.common.data_migrator_drivers:SwiftAccessDriver
