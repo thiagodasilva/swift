@@ -234,15 +234,6 @@ class ObjectController(Controller):
     @delay_denial
     def POST(self, req):
         """HTTP POST request handler."""
-        if 'x-delete-after' in req.headers:
-            try:
-                x_delete_after = int(req.headers['x-delete-after'])
-            except ValueError:
-                return HTTPBadRequest(request=req,
-                                      content_type='text/plain',
-                                      body='Non-integer X-Delete-After')
-            req.headers['x-delete-at'] = normalize_delete_at_timestamp(
-                time.time() + x_delete_after)
         if self.app.object_post_as_copy:
             req.method = 'PUT'
             req.path_info = '/v1/%s/%s/%s' % (
@@ -278,29 +269,14 @@ class ObjectController(Controller):
                     return aresp
             if not containers:
                 return HTTPNotFound(request=req)
-            if 'x-delete-at' in req.headers:
-                try:
-                    x_delete_at = normalize_delete_at_timestamp(
-                        int(req.headers['x-delete-at']))
-                    if int(x_delete_at) < time.time():
-                        return HTTPBadRequest(
-                            body='X-Delete-At in past', request=req,
-                            content_type='text/plain')
-                except ValueError:
-                    return HTTPBadRequest(request=req,
-                                          content_type='text/plain',
-                                          body='Non-integer X-Delete-At')
-                req.environ.setdefault('swift.log_info', []).append(
-                    'x-delete-at:%s' % x_delete_at)
-                delete_at_container = normalize_delete_at_timestamp(
-                    int(x_delete_at) /
-                    self.app.expiring_objects_container_divisor *
-                    self.app.expiring_objects_container_divisor)
-                delete_at_part, delete_at_nodes = \
-                    self.app.container_ring.get_nodes(
-                        self.app.expiring_objects_account, delete_at_container)
-            else:
-                delete_at_container = delete_at_part = delete_at_nodes = None
+
+            try:
+                req, delete_at_container, delete_at_part, \
+                    delete_at_nodes = self._config_obj_expiration(req)
+            except ValueError as e:
+                return HTTPBadRequest(request=req, content_type='text/plain',
+                                      body=str(e))
+
             # pass the policy index to storage nodes via req header
             policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
                                            container_info['storage_policy'])
@@ -446,6 +422,42 @@ class ObjectController(Controller):
             bodies.append('')
         return statuses, reasons, bodies, etags
 
+    def _config_obj_expiration(self, req):
+        delete_at_container = None
+        delete_at_part = None
+        delete_at_nodes = None
+
+        if 'x-delete-after' in req.headers:
+            try:
+                x_delete_after = int(req.headers['x-delete-after'])
+            except ValueError:
+                raise ValueError('Non-integer X-Delete-After')
+
+            req.headers['x-delete-at'] = normalize_delete_at_timestamp(
+                time.time() + x_delete_after)
+
+        if 'x-delete-at' in req.headers:
+            try:
+                x_delete_at = int(normalize_delete_at_timestamp(
+                    int(req.headers['x-delete-at'])))
+            except ValueError:
+                raise ValueError('Non-integer X-Delete-At')
+
+            if x_delete_at < time.time():
+                raise ValueError('X-Delete-At in past')
+
+            req.environ.setdefault('swift.log_info', []).append(
+                'x-delete-at:%s' % x_delete_at)
+            delete_at_container = normalize_delete_at_timestamp(
+                x_delete_at /
+                self.app.expiring_objects_container_divisor *
+                self.app.expiring_objects_container_divisor)
+            delete_at_part, delete_at_nodes = \
+                self.app.container_ring.get_nodes(
+                    self.app.expiring_objects_account, delete_at_container)
+
+        return req, delete_at_container, delete_at_part, delete_at_nodes
+
     @public
     @cors_validation
     @delay_denial
@@ -460,6 +472,7 @@ class ObjectController(Controller):
         policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
                                        container_info['storage_policy'])
         obj_ring = self.app.get_object_ring(policy_index)
+
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
         container_partition = container_info['partition']
@@ -471,8 +484,10 @@ class ObjectController(Controller):
             aresp = req.environ['swift.authorize'](req)
             if aresp:
                 return aresp
+
         if not containers:
             return HTTPNotFound(request=req)
+
         try:
             ml = req.message_length()
         except ValueError as e:
@@ -483,17 +498,10 @@ class ObjectController(Controller):
                                       body=str(e))
         if ml is not None and ml > constraints.MAX_FILE_SIZE:
             return HTTPRequestEntityTooLarge(request=req)
-        if 'x-delete-after' in req.headers:
-            try:
-                x_delete_after = int(req.headers['x-delete-after'])
-            except ValueError:
-                return HTTPBadRequest(request=req,
-                                      content_type='text/plain',
-                                      body='Non-integer X-Delete-After')
-            req.headers['x-delete-at'] = normalize_delete_at_timestamp(
-                time.time() + x_delete_after)
+
         partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
+
         # do a HEAD request for container sync and checking object versions
         if 'x-timestamp' in req.headers or \
                 (object_versions and not
@@ -506,6 +514,7 @@ class ObjectController(Controller):
             hresp = self.GETorHEAD_base(
                 hreq, _('Object'), obj_ring, partition,
                 hreq.swift_entity_path)
+
         # Used by container sync feature
         if 'x-timestamp' in req.headers:
             try:
@@ -521,6 +530,7 @@ class ObjectController(Controller):
             req.headers['X-Timestamp'] = req_timestamp.internal
         else:
             req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+
         # Sometimes the 'content-type' header exists, but is set to None.
         content_type_manually_set = True
         detect_content_type = \
@@ -584,6 +594,7 @@ class ObjectController(Controller):
             source_header = '/%s/%s/%s/%s' % (ver, acct,
                                               src_container_name, src_obj_name)
             source_req = req.copy_get()
+
             # make sure the source request uses it's container_info
             source_req.headers.pop('X-Backend-Storage-Policy-Index', None)
             source_req.path_info = source_header
@@ -595,6 +606,7 @@ class ObjectController(Controller):
             sink_req = Request.blank(req.path_info,
                                      environ=req.environ, headers=req.headers)
             source_resp = self.GET(source_req)
+
             # This gives middlewares a way to change the source; for example,
             # this lets you COPY a SLO manifest and have the new object be the
             # concatenation of the segments (like what a GET request gives
@@ -619,6 +631,7 @@ class ObjectController(Controller):
             if sink_req.content_length > constraints.MAX_FILE_SIZE:
                 return HTTPRequestEntityTooLarge(request=req)
             sink_req.etag = source_resp.etag
+
             # we no longer need the X-Copy-From header
             del sink_req.headers['X-Copy-From']
             if not content_type_manually_set:
@@ -628,6 +641,7 @@ class ObjectController(Controller):
                     sink_req.headers.get('x-fresh-metadata', 'false')):
                 copy_headers_into(source_resp, sink_req)
                 copy_headers_into(req, sink_req)
+
             # copy over x-static-large-object for POSTs and manifest copies
             if 'X-Static-Large-Object' in source_resp.headers and \
                     req.params.get('multipart-manifest') == 'get':
@@ -636,28 +650,12 @@ class ObjectController(Controller):
 
             req = sink_req
 
-        if 'x-delete-at' in req.headers:
-            try:
-                x_delete_at = normalize_delete_at_timestamp(
-                    int(req.headers['x-delete-at']))
-                if int(x_delete_at) < time.time():
-                    return HTTPBadRequest(
-                        body='X-Delete-At in past', request=req,
-                        content_type='text/plain')
-            except ValueError:
-                return HTTPBadRequest(request=req, content_type='text/plain',
-                                      body='Non-integer X-Delete-At')
-            req.environ.setdefault('swift.log_info', []).append(
-                'x-delete-at:%s' % x_delete_at)
-            delete_at_container = normalize_delete_at_timestamp(
-                int(x_delete_at) /
-                self.app.expiring_objects_container_divisor *
-                self.app.expiring_objects_container_divisor)
-            delete_at_part, delete_at_nodes = \
-                self.app.container_ring.get_nodes(
-                    self.app.expiring_objects_account, delete_at_container)
-        else:
-            delete_at_container = delete_at_part = delete_at_nodes = None
+        try:
+            req, delete_at_container, delete_at_part, \
+                delete_at_nodes = self._config_obj_expiration(req)
+        except ValueError as e:
+            return HTTPBadRequest(request=req, content_type='text/plain',
+                                  body=str(e))
 
         node_iter = GreenthreadSafeIterator(
             self.iter_nodes_local_first(obj_ring, partition))
