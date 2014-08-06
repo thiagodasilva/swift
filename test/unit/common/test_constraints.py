@@ -23,7 +23,7 @@ from test.unit import MockTrue
 
 from swift.common.swob import HTTPBadRequest, Request, HTTPException
 from swift.common.http import HTTP_REQUEST_ENTITY_TOO_LARGE, \
-    HTTP_BAD_REQUEST, HTTP_LENGTH_REQUIRED
+    HTTP_BAD_REQUEST, HTTP_LENGTH_REQUIRED, HTTP_NOT_IMPLEMENTED
 from swift.common import constraints, utils
 
 
@@ -125,18 +125,60 @@ class TestConstraints(unittest.TestCase):
                    'Content-Type': 'text/plain'}
         self.assertEquals(constraints.check_object_creation(Request.blank(
             '/', headers=headers), 'object_name'), None)
+
         headers = {'Content-Length': str(constraints.MAX_FILE_SIZE + 1),
                    'Content-Type': 'text/plain'}
         self.assertEquals(constraints.check_object_creation(
             Request.blank('/', headers=headers), 'object_name').status_int,
             HTTP_REQUEST_ENTITY_TOO_LARGE)
+
         headers = {'Transfer-Encoding': 'chunked',
                    'Content-Type': 'text/plain'}
         self.assertEquals(constraints.check_object_creation(Request.blank(
             '/', headers=headers), 'object_name'), None)
+
+        headers = {'Transfer-Encoding': 'gzip',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name').status_int,
+            HTTP_BAD_REQUEST)
+
         headers = {'Content-Type': 'text/plain'}
         self.assertEquals(constraints.check_object_creation(
             Request.blank('/', headers=headers), 'object_name').status_int,
+            HTTP_LENGTH_REQUIRED)
+
+        headers = {'Content-Length': 'abc',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name').status_int,
+            HTTP_BAD_REQUEST)
+
+        headers = {'Transfer-Encoding': 'gzip,chunked',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name').status_int,
+            HTTP_NOT_IMPLEMENTED)
+
+    def test_check_object_creation_copy(self):
+        headers = {'Content-Length': '0',
+                   'X-Copy-From': 'c/o2',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name'), None)
+
+        headers = {'Content-Length': '1',
+                   'X-Copy-From': 'c/o2',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name').status_int,
+            HTTP_BAD_REQUEST)
+
+        # a content-length header is always required
+        headers = {'X-Copy-From': 'c/o2',
+                   'Content-Type': 'text/plain'}
+        self.assertEquals(constraints.check_object_creation(Request.blank(
+            '/', headers=headers), 'object_name').status_int,
             HTTP_LENGTH_REQUIRED)
 
     def test_check_object_creation_name_length(self):

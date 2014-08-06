@@ -55,7 +55,7 @@ from swift.proxy.controllers.base import Controller, delay_denial, \
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, \
-    HTTPClientDisconnect, HTTPNotImplemented
+    HTTPClientDisconnect
 from swift.common.request_helpers import is_user_meta
 
 
@@ -488,16 +488,28 @@ class ObjectController(Controller):
         if not containers:
             return HTTPNotFound(request=req)
 
-        try:
-            ml = req.message_length()
-        except ValueError as e:
-            return HTTPBadRequest(request=req, content_type='text/plain',
-                                  body=str(e))
-        except AttributeError as e:
-            return HTTPNotImplemented(request=req, content_type='text/plain',
-                                      body=str(e))
-        if ml is not None and ml > constraints.MAX_FILE_SIZE:
-            return HTTPRequestEntityTooLarge(request=req)
+        # Sometimes the 'content-type' header exists, but is set to None.
+        content_type_manually_set = True
+        detect_content_type = \
+            config_true_value(req.headers.get('x-detect-content-type'))
+        if detect_content_type or not req.headers.get('content-type'):
+            guessed_type, _junk = mimetypes.guess_type(req.path_info)
+            req.headers['Content-Type'] = guessed_type or \
+                'application/octet-stream'
+            if detect_content_type:
+                req.headers.pop('x-detect-content-type')
+            else:
+                content_type_manually_set = False
+
+        if 'swift.constraints' in req.environ:
+            error_response = \
+                req.environ['swift.constraints'](req, self.object_name) or \
+                check_content_type(req)
+        else:
+            error_response = check_object_creation(req, self.object_name) or \
+                check_content_type(req)
+        if error_response:
+            return error_response
 
         partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
@@ -506,6 +518,7 @@ class ObjectController(Controller):
         if 'x-timestamp' in req.headers or \
                 (object_versions and not
                  req.environ.get('swift_versioned_copy')):
+
             # make sure proxy-server uses the right policy index
             _headers = {'X-Backend-Storage-Policy-Index': policy_index,
                         'X-Newest': 'True'}
@@ -531,23 +544,6 @@ class ObjectController(Controller):
         else:
             req.headers['X-Timestamp'] = Timestamp(time.time()).internal
 
-        # Sometimes the 'content-type' header exists, but is set to None.
-        content_type_manually_set = True
-        detect_content_type = \
-            config_true_value(req.headers.get('x-detect-content-type'))
-        if detect_content_type or not req.headers.get('content-type'):
-            guessed_type, _junk = mimetypes.guess_type(req.path_info)
-            req.headers['Content-Type'] = guessed_type or \
-                'application/octet-stream'
-            if detect_content_type:
-                req.headers.pop('x-detect-content-type')
-            else:
-                content_type_manually_set = False
-
-        error_response = check_object_creation(req, self.object_name) or \
-            check_content_type(req)
-        if error_response:
-            return error_response
         if object_versions and not req.environ.get('swift_versioned_copy'):
             if hresp.status_int != HTTP_NOT_FOUND:
                 # This is a version manifest and needs to be handled

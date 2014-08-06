@@ -19,8 +19,8 @@ from urllib import unquote
 from ConfigParser import ConfigParser, NoSectionError, NoOptionError
 
 from swift.common import utils, exceptions
-from swift.common.swob import HTTPBadRequest, HTTPLengthRequired, \
-    HTTPRequestEntityTooLarge, HTTPPreconditionFailed
+from swift.common.swob import HTTPBadRequest, HTTPRequestEntityTooLarge, \
+    HTTPPreconditionFailed, HTTPNotImplemented, HTTPLengthRequired
 
 MAX_FILE_SIZE = 5368709122
 MAX_META_NAME_LENGTH = 128
@@ -152,26 +152,40 @@ def check_object_creation(req, object_name):
     :returns HTTPRequestEntityTooLarge: the object is too large
     :returns HTTPLengthRequired: missing content-length header and not
                                  a chunked request
-    :returns HTTPBadRequest: missing or bad content-type header, or
+    :returns HTTPBadRequest: bad content-type header value, or
                              bad metadata
+    :returns HTTPNotImplemented: if the last value of the transfer-encoding
+            header is not "chunked"
     """
-    if req.content_length and req.content_length > MAX_FILE_SIZE:
+    try:
+        ml = req.message_length()
+    except ValueError as e:
+        return HTTPBadRequest(request=req, content_type='text/plain',
+                              body=str(e))
+    except AttributeError as e:
+        return HTTPNotImplemented(request=req, content_type='text/plain',
+                                  body=str(e))
+    except KeyError as e:
+        return HTTPLengthRequired(request=req, content_type='text/plain',
+                                  body=str(e))
+    if ml is not None and ml > MAX_FILE_SIZE:
         return HTTPRequestEntityTooLarge(body='Your request is too large.',
                                          request=req,
                                          content_type='text/plain')
-    if req.content_length is None and \
-            req.headers.get('transfer-encoding') != 'chunked':
-        return HTTPLengthRequired(request=req)
+
     if 'X-Copy-From' in req.headers and req.content_length:
         return HTTPBadRequest(body='Copy requests require a zero byte body',
                               request=req, content_type='text/plain')
+
     if len(object_name) > MAX_OBJECT_NAME_LENGTH:
         return HTTPBadRequest(body='Object name length of %d longer than %d' %
                               (len(object_name), MAX_OBJECT_NAME_LENGTH),
                               request=req, content_type='text/plain')
+
     if 'Content-Type' not in req.headers:
         return HTTPBadRequest(request=req, content_type='text/plain',
                               body='No content type')
+
     if not check_utf8(req.headers['Content-Type']):
         return HTTPBadRequest(request=req, body='Invalid Content-Type',
                               content_type='text/plain')

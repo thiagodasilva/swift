@@ -990,6 +990,8 @@ class Request(object):
             headers have bad values
         :raises AttributeError: if the last value of the transfer-encoding
             header is not "chunked"
+        :raises KeyError: if either transfer-encoding or content-length
+            headers are not provided
         """
         te = self.headers.get('transfer-encoding')
         if te:
@@ -1015,6 +1017,8 @@ class Request(object):
                     fsize = int(fsize)
                 except ValueError:
                     raise ValueError('Invalid Content-Length header value')
+            else:
+                raise KeyError('Missing Content-Length header')
         else:
             fsize = None
         return fsize

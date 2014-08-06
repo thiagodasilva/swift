@@ -874,7 +874,12 @@ class TestRequest(unittest.TestCase):
         req = swift.common.swob.Request.blank(
             u'/',
             environ={'REQUEST_METHOD': 'PUT', 'PATH_INFO': '/'})
-        self.assertEquals(req.message_length(), None)
+        try:
+            req.message_length()
+        except KeyError as e:
+            self.assertEquals(str(e), "'Missing Content-Length header'")
+        else:
+            self.fail("Expected a KeyError for missing content-length")
 
         req = swift.common.swob.Request.blank(
             u'/',
