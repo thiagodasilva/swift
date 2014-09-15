@@ -17,7 +17,6 @@ from swift.common.utils import register_swift_info
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotFound
 from swift.common.swob import HTTPPreconditionFailed
 from swift.proxy.controllers.base import get_container_info
-import time
 from httplib import NOT_FOUND, CREATED, ACCEPTED, OK
 from swift.common.wsgi import WSGIContext
 from swift.common.data_migration_common import DataMigrationDriverError
@@ -259,64 +258,21 @@ class DataMigrationMiddleware(object):
         orig_env = dict(original_env)
         access_resolver = self.remote_driver_resolver(container_md,
                                                       self.migration_conf)
+
         try:
-            metadata, read_length, body_stream, \
-                content_type, timestamp = access_resolver.get_object(obj)
+            status = access_resolver.migrate_object(obj, original_env,
+                                                    self.app)
         except DataMigrationDriverError as e:
             raise DataMigrationError(str(e))
 
-        if body_stream is None:
-            raise DataMigrationError('Failed to retrieve object for migration')
-        sys_metadata = dict()
-        sys_metadata['Migration-Import-Time'] = str(time.time())
-        sys_metadata['Migration-Import-Owner'] = 'On-Demand'
-
-        status = self.upload_object(original_env, body_stream, read_length,
-                                    metadata, sys_metadata, content_type,
-                                    timestamp)
         access_resolver.finalize()
+
         if (status in [OK, CREATED, ACCEPTED]):
             ctx = DataMigrationContext(self.app)
             return ctx.handle_original_call(orig_env, start_response)
         else:
             raise DataMigrationError('Failed to create local object.' +
                                      'Status {0}'.format(status))
-
-    def upload_object(self, env, data, length, metadata, sys_metadata,
-                      content_type, timestamp):
-        """
-        Swift internal call to upload an object to Swift.
-
-        :param env: environ of the application
-        :param data: object's data as an iterator
-        :param length: size of an object
-        :param metadata: metadata of an object
-        :param sys_metadata: system metadata of an object
-        :param content_type: content type of an object
-        :param timestamp: timestamp of an object in the old storage
-        :returns HTTP code result of an upload operation
-        """
-        new_env = dict(env)
-        new_env['REQUEST_METHOD'] = 'PUT'
-        new_env['wsgi.input'] = data
-        new_env['CONTENT_LENGTH'] = length
-        new_env['CONTENT_TYPE'] = content_type
-        new_env['swift.source'] = 'DM'
-        create_obj_req = Request.blank(new_env['PATH_INFO'], new_env)
-        create_obj_req.headers['X-Timestamp'] = min(time.time(),
-                                                    float(timestamp))
-        for key in metadata.keys():
-            if key.lower().startswith('x-object-meta-'):
-                create_obj_req.headers[key] = metadata[key]
-            else:
-                create_obj_req.headers['X-Object-Meta-' +
-                                       key] = metadata[key]
-        for key in sys_metadata.keys():
-            create_obj_req.headers['X-Object-Sysmeta-' +
-                                   key] = sys_metadata[key]
-
-        resp = create_obj_req.get_response(self.app)
-        return resp.status_int
 
     def remote_driver_resolver(self, container_md, migration_conf):
         """

@@ -19,6 +19,8 @@ from xattr import xattr
 from swift.common.request_helpers import is_user_meta
 from swift.common.data_migration_common import DataMigrationDriver
 from swift.common.data_migration_common import DataMigrationDriverError
+from swift.common.utils import split_path
+from swift.common.swob import Request
 
 SWIFTCLIENT_IMPORTED = False
 try:
@@ -98,7 +100,7 @@ class FileSystemAccessDriver(DataMigrationDriver):
             md = dict()
             md['uid'] = statinfo.st_uid
             md['gid'] = statinfo.st_gid
-            last_modified = statinfo.st_mtime
+            last_modified = statinfo.st_ctime
             content_type, encoding = mimetypes.guess_type(file_path)
             self.object_to_migrate = open(file_path, "r")
             try:
@@ -115,7 +117,7 @@ class FileSystemAccessDriver(DataMigrationDriver):
         self.object_to_migrate.close()
 
 
-class SwiftAccessDriver(DataMigrationDriver):
+class RemoteSwiftAccessDriver(DataMigrationDriver):
     """
     Driver to migrate data from Swift based on swift client.
 
@@ -184,3 +186,31 @@ class SwiftAccessDriver(DataMigrationDriver):
                 resp, resp_headers.get('content-type'), \
                 resp_headers.get('x-timestamp')
         return {}, None, None, None, None
+
+
+class LocalSwiftAccessDriver(DataMigrationDriver):
+    driver_loaded = True
+
+    def __init__(self, data_source, params):
+        """
+        :param data_source:  a container that contains objects.
+        :param params: additional parameters to the driver
+        """
+        self.data_source = data_source
+        self.source_account = params.get('source_account', None)
+
+    def migrate_object(self, obj, original_env, app):
+        (version, dest_account, dest_container, dest_obj) = \
+            split_path(original_env['PATH_INFO'], 4, 4, True)
+        account = dest_account
+        copy_headers = {'Destination': '%s/%s' % (dest_container, obj)}
+        if self.source_account and self.source_account != dest_account:
+            copy_headers['Destination-Account'] = dest_account
+            account = self.source_account
+        source_path = '/%s/%s/%s/%s' % \
+            (version, account, self.data_source, obj)
+
+        copy_req = Request.blank(source_path, headers=copy_headers,
+                                 environ={'REQUEST_METHOD': 'COPY'})
+        resp = copy_req.get_response(app)
+        return resp.status_int

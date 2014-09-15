@@ -15,7 +15,7 @@
 
 import unittest
 from swift.common.middleware.data_migration import DataMigrationError
-from swift.common.data_migrator_drivers import SwiftAccessDriver, \
+from swift.common.data_migrator_drivers import RemoteSwiftAccessDriver, \
     FileSystemAccessDriver
 from swift.common.utils import split_path
 from swift.common.swob import Request, Response
@@ -38,7 +38,7 @@ global_conf = {'log_name': 'proxy-server',
 local_conf = {'driver_swift_keys': 'token-url,user,key',
               'supported_drivers': 'fsystem,swift',
               'driver_swift_module': 'swift.common.data_migrator_' +
-              'drivers:SwiftAccessDriver',
+              'drivers:RemoteSwiftAccessDriver',
               'driver_fsystem_module': 'swift.common.data_migrator_' +
               'drivers:FileSystemAccessDriver'}
 
@@ -193,7 +193,7 @@ class TestDataMigrationSwiftClient(unittest.TestCase):
     local_conf = {'driver_swift_keys': 'token-url,user,key',
                   'supported_drivers': 'fsystem,swift',
                   'driver_swift_module': 'swift.common.data_' +
-                  'migrator_drivers:SwiftAccessDriver',
+                  'migrator_drivers:RemoteSwiftAccessDriver',
                   'driver_fsystem_module': 'swift.common.data_' +
                   'migrator_drivers:FileSystemAccessDriver'}
     headers = {'X-Container-Migration-Active': 'True',
@@ -241,7 +241,7 @@ class TestDataMigration(unittest.TestCase):
     def test_remote_driver_resolver_swift(self):
         keys = ['token-url', 'user', 'key']
         add_params = {'driver_fsystem_parent_path': '/tmp/'}
-        migration_conf = {'swift': {'the_class': SwiftAccessDriver,
+        migration_conf = {'swift': {'the_class': RemoteSwiftAccessDriver,
                                     'driver_loaded': True,
                                     'keys': keys,
                                     'additional_params': add_params}}
@@ -251,7 +251,7 @@ class TestDataMigration(unittest.TestCase):
                         'migration-user': 'username',
                         'migration-key': 'secret'}
         driver = self.app.remote_driver_resolver(container_md, migration_conf)
-        self.assertTrue(isinstance(driver, SwiftAccessDriver))
+        self.assertTrue(isinstance(driver, RemoteSwiftAccessDriver))
         self.assertEqual(driver.data_source, 'a_source')
         self.assertEqual(driver.user, 'username')
         self.assertEqual(driver.key, 'secret')
