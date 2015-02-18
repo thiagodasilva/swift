@@ -79,7 +79,7 @@ bind_port = 8080
 [pipeline:main]
 # This sample pipeline uses tempauth and is used for SAIO dev work and
 # testing. See below for a pipeline using keystone.
-pipeline = catch_errors gatekeeper healthcheck proxy-logging cache container_sync bulk tempurl ratelimit tempauth container-quotas account-quotas slo dlo versioned_writes proxy-logging proxy-server
+pipeline = catch_errors gatekeeper healthcheck proxy-logging cache container_sync bulk tempurl ratelimit tempauth container-quotas account-quotas slo dlo versioned_writes server_side_copy proxy-logging proxy-server
 
 # The following pipeline shows keystone integration. Comment out the one
 # above and uncomment this one. Additional steps for integrating keystone are
@@ -128,12 +128,6 @@ use = egg:swift#proxy
 # If set to 'true' any authorized user may create and delete accounts; if
 # 'false' no one, even authorized, can.
 # allow_account_management = false
-#
-# Set object_post_as_copy = false to turn on fast posts where only the metadata
-# changes are stored anew and the original data file is kept in place. This
-# makes for quicker posts; but since the container metadata isn't updated in
-# this mode, features like container sync won't be able to sync posts.
-# object_post_as_copy = true
 #
 # If set to 'true' authorized accounts that do not yet exist within the Swift
 # cluster will be automatically created.
@@ -720,3 +714,13 @@ use = egg:swift#versioned_writes
 # in the container configuration file, which will be eventually
 # deprecated. See documentation for more details.
 # allow_versioned_writes = false
+
+# Note: Put after auth, versioned_writes, dlo and slo middlewares.
+# If you don't put it in the pipeline, it will be inserted for you.
+[filter:server_side_copy]
+use = egg:swift#server_side_copy
+# Set object_post_as_copy = false to turn on fast posts where only the metadata
+# changes are stored anew and the original data file is kept in place. This
+# makes for quicker posts; but since the container metadata isn't updated in
+# this mode, features like container sync won't be able to sync posts.
+# object_post_as_copy = true

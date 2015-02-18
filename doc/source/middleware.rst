@@ -164,6 +164,15 @@ Object Versioning
     :members:
     :show-inheritance:
 
+.. _server_side_copy:
+
+Server Side Copy
+================
+
+.. automodule:: swift.common.middleware.server_side_copy
+    :members:
+    :show-inheritance:
+
 Proxy Logging
 =============
 

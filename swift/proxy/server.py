@@ -68,7 +68,13 @@ required_filters = [
         'catch_errors', 'gatekeeper', 'proxy_logging']},
     {'name': 'versioned_writes', 'after_fn': lambda _junk: [
         'staticweb', 'tempauth', 'keystoneauth',
-        'catch_errors', 'gatekeeper', 'proxy_logging']}]
+        'catch_errors', 'gatekeeper', 'proxy_logging']},
+    # Put server_side_copy after dlo, slo and versioned_writes
+    # Copy hooks set by dlo, slo are invoked from copy middleware.
+    {'name': 'server_side_copy', 'after_fn': lambda _junk: [
+        'staticweb', 'tempauth', 'keystoneauth',
+        'catch_errors', 'gatekeeper', 'proxy_logging',
+        'slo', 'dlo', 'versioned_writes']}]
 
 
 class Application(object):
@@ -107,8 +113,6 @@ class Application(object):
             int(conf.get('recheck_account_existence', 60))
         self.allow_account_management = \
             config_true_value(conf.get('allow_account_management', 'no'))
-        self.object_post_as_copy = \
-            config_true_value(conf.get('object_post_as_copy', 'true'))
         self.container_ring = container_ring or Ring(swift_dir,
                                                      ring_name='container')
         self.account_ring = account_ring or Ring(swift_dir,
@@ -389,19 +393,17 @@ class Application(object):
                 # controller's method indicates it'd like to gather more
                 # information and try again later.
                 resp = req.environ['swift.authorize'](req)
-                if not resp and not req.headers.get('X-Copy-From-Account') \
-                        and not req.headers.get('Destination-Account'):
+                if not resp:
                     # No resp means authorized, no delayed recheck required.
                     old_authorize = req.environ['swift.authorize']
                 else:
                     # Response indicates denial, but we might delay the denial
                     # and recheck later. If not delayed, return the error now.
-                    if not getattr(handler, 'delay_denial', None):
+                    if not getattr(handler, 'delay_denial', None) and resp:
                         return resp
             # Save off original request method (GET, POST, etc.) in case it
             # gets mutated during handling.  This way logging can display the
             # method the client actually sent.
-            req.environ['swift.orig_req_method'] = req.method
             try:
                 if old_authorize:
                     req.environ.pop('swift.authorize', None)
@@ -409,6 +411,10 @@ class Application(object):
             finally:
                 if old_authorize:
                     req.environ['swift.authorize'] = old_authorize
+            # If server side copy middleware has set this, do not overwrite.
+            if not req.environ.get('swift.orig_req_method', None):
+                req.environ['swift.orig_req_method'] = req.method
+            return handler(req)
         except HTTPException as error_response:
             return error_response
         except (Exception, Timeout):

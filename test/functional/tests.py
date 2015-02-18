@@ -1267,12 +1267,10 @@ class TestFile(Base):
                     acct,
                     '%s%s' % (prefix, self.env.container),
                     Utils.create_name()))
-                if acct == acct2:
-                    # there is no such source container
-                    # and foreign user can have no permission to read it
-                    self.assert_status(403)
-                else:
-                    self.assert_status(404)
+                # there is no such source container but user has
+                # permissions to do a GET (done internally via COPY) for
+                # objects in his own account.
+                self.assert_status(404)
 
                 self.assertFalse(file_item.copy_account(
                     acct,
@@ -1286,12 +1284,10 @@ class TestFile(Base):
                     acct,
                     '%s%s' % (prefix, self.env.container),
                     Utils.create_name()))
-                if acct == acct2:
-                    # there is no such object
-                    # and foreign user can have no permission to read it
-                    self.assert_status(403)
-                else:
-                    self.assert_status(404)
+                # there is no such source container but user has
+                # permissions to do a GET (done internally via COPY) for
+                # objects in his own account.
+                self.assert_status(404)
 
                 self.assertFalse(file_item.copy_account(
                     acct,

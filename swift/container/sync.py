@@ -100,8 +100,8 @@ class ContainerSync(Daemon):
 
     .. note::
 
-        Container sync will sync object POSTs only if the proxy server is set
-        to use "object_post_as_copy = true" which is the default. So-called
+        Container sync will sync object POSTs only if the copy middleware is
+        set to use "object_post_as_copy = true" which is the default. So-called
         fast object posts, "object_post_as_copy = false" do not update the
         container listings and therefore can't be detected for synchronization.
 

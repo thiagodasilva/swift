@@ -161,33 +161,6 @@ class TestConstraints(unittest.TestCase):
             '/', headers=headers), 'object_name').status_int,
             HTTP_NOT_IMPLEMENTED)
 
-    def test_check_object_creation_copy(self):
-        headers = {'Content-Length': '0',
-                   'X-Copy-From': 'c/o2',
-                   'Content-Type': 'text/plain'}
-        self.assertEqual(constraints.check_object_creation(Request.blank(
-            '/', headers=headers), 'object_name'), None)
-
-        headers = {'Content-Length': '1',
-                   'X-Copy-From': 'c/o2',
-                   'Content-Type': 'text/plain'}
-        self.assertEqual(constraints.check_object_creation(Request.blank(
-            '/', headers=headers), 'object_name').status_int,
-            HTTP_BAD_REQUEST)
-
-        headers = {'Transfer-Encoding': 'chunked',
-                   'X-Copy-From': 'c/o2',
-                   'Content-Type': 'text/plain'}
-        self.assertEqual(constraints.check_object_creation(Request.blank(
-            '/', headers=headers), 'object_name'), None)
-
-        # a content-length header is always required
-        headers = {'X-Copy-From': 'c/o2',
-                   'Content-Type': 'text/plain'}
-        self.assertEqual(constraints.check_object_creation(Request.blank(
-            '/', headers=headers), 'object_name').status_int,
-            HTTP_LENGTH_REQUIRED)
-
     def test_check_object_creation_name_length(self):
         headers = {'Transfer-Encoding': 'chunked',
                    'Content-Type': 'text/plain'}
