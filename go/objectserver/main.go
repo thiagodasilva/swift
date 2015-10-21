@@ -425,7 +425,7 @@ func LibradosBackendFileWriter(server *ObjectServer,
 	}
 	rados_obj.Setxattr("user.swift.metadata", md)
 
-	server.containerUpdates(request, metadata, request.Header.Get("X-Delete-At"))
+	server.containerUpdates(request, metadata, request.Header.Get("X-Delete-At"), vars)
 	hummingbird.StandardResponse(writer, http.StatusCreated)
 }
 
