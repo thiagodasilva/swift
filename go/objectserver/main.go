@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ import (
 	"github.com/justinas/alice"
 	"github.com/openstack/swift/go/hummingbird"
 	"github.com/openstack/swift/go/middleware"
+	"github.com/thiagodasilva/gorados"
 )
 
 type ObjectServer struct {
@@ -57,9 +59,163 @@ type ObjectServer struct {
 	expiringDivisor  int64
 	updateClient     *http.Client
 	replicateTimeout time.Duration
+	cephCluster      *gorados.RadosCluster
 }
 
 func (server *ObjectServer) ObjGetHandler(writer http.ResponseWriter, request *http.Request) {
+	vars := hummingbird.GetVars(request)
+	headers := writer.Header()
+	hashDir := ObjHashDir(vars, server.driveRoot, server.hashPathPrefix, server.hashPathSuffix)
+
+	// Get striped object
+	tail_object_name := hashDir
+
+	rados_obj := &gorados.RadosStripedObject{}
+	rados_obj.ObjectName = tail_object_name
+	rados_obj.Ioctx = server.cephCluster.Ioctx
+
+	err := rados_obj.Connect()
+	if err != nil {
+		hummingbird.StandardResponse(writer, 500)
+		return
+	}
+	defer rados_obj.Destroy()
+
+	// get metadata
+	metadata := map[string]string{}
+	xattr_value, err := rados_obj.Getxattr("user.swift.metadata")
+	err2 := json.Unmarshal(xattr_value, &metadata)
+	if err != nil || err2 != nil {
+		// TODO: fix err2 handling
+		hummingbird.GetLogger(request).LogError("Error getting metadata from (%s): %s", tail_object_name, err.Error())
+		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+
+	contentLength, err := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+	if err != nil {
+		hummingbird.GetLogger(request).LogError("Error getting the content length from content-length: %s", err.Error())
+		http.Error(writer, "Invalid Content-Length header", http.StatusBadRequest)
+		return
+	}
+
+	if size, _, err := rados_obj.Stat(); err != nil || int64(size) != contentLength {
+		hummingbird.GetLogger(request).LogError("Error getting size of object")
+		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+
+	headers.Set("X-Backend-Timestamp", metadata["X-Timestamp"])
+	if deleteAt, ok := metadata["X-Delete-At"]; ok {
+		if deleteTime, err := hummingbird.ParseDate(deleteAt); err == nil && deleteTime.Before(time.Now()) {
+			hummingbird.StandardResponse(writer, http.StatusNotFound)
+			return
+		}
+	}
+
+	lastModified, err := hummingbird.ParseDate(metadata["X-Timestamp"])
+	if err != nil {
+		hummingbird.GetLogger(request).LogError("Error getting timestamp from %s: %s", tail_object_name, err.Error())
+		hummingbird.StandardResponse(writer, http.StatusInternalServerError)
+		return
+	}
+	lastModifiedHeader := lastModified
+	if lastModified.Nanosecond() > 0 { // for some reason, Last-Modified is ceil(X-Timestamp)
+		lastModifiedHeader = lastModified.Truncate(time.Second).Add(time.Second)
+	}
+	headers.Set("Last-Modified", lastModifiedHeader.Format(time.RFC1123))
+	headers.Set("ETag", "\""+metadata["ETag"]+"\"")
+	xTimestamp, err := hummingbird.GetEpochFromTimestamp(metadata["X-Timestamp"])
+	if err != nil {
+		hummingbird.GetLogger(request).LogError("Error getting the epoch time from x-timestamp: %s", err.Error())
+		http.Error(writer, "Invalid X-Timestamp header", http.StatusBadRequest)
+		return
+	}
+	headers.Set("X-Timestamp", xTimestamp)
+	for key, value := range metadata {
+		if allowed, ok := server.allowedHeaders[key]; (ok && allowed) ||
+			strings.HasPrefix(key, "X-Object-Meta-") ||
+			strings.HasPrefix(key, "X-Object-Sysmeta-") {
+			headers.Set(key, value)
+		}
+	}
+
+	if im := request.Header.Get("If-Match"); im != "" && !strings.Contains(im, metadata["ETag"]) && !strings.Contains(im, "*") {
+		hummingbird.StandardResponse(writer, http.StatusPreconditionFailed)
+		return
+	}
+
+	if inm := request.Header.Get("If-None-Match"); inm != "" && (strings.Contains(inm, metadata["ETag"]) || strings.Contains(inm, "*")) {
+		writer.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	if ius, err := hummingbird.ParseDate(request.Header.Get("If-Unmodified-Since")); err == nil && lastModified.After(ius) {
+		hummingbird.StandardResponse(writer, http.StatusPreconditionFailed)
+		return
+	}
+
+	if ims, err := hummingbird.ParseDate(request.Header.Get("If-Modified-Since")); err == nil && lastModified.Before(ims) {
+		writer.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	headers.Set("Accept-Ranges", "bytes")
+	headers.Set("Content-Type", metadata["Content-Type"])
+	headers.Set("Content-Length", metadata["Content-Length"])
+
+	/*
+		TODO: handle ranges
+		if rangeHeader := request.Header.Get("Range"); rangeHeader != "" {
+			ranges, err := hummingbird.ParseRange(rangeHeader, contentLength)
+			if err != nil {
+				headers.Set("Content-Length", "0")
+				writer.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			} else if ranges != nil && len(ranges) == 1 {
+				headers.Set("Content-Length", strconv.FormatInt(int64(ranges[0].End-ranges[0].Start), 10))
+				headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", ranges[0].Start, ranges[0].End-1, contentLength))
+				writer.WriteHeader(http.StatusPartialContent)
+				file.Seek(ranges[0].Start, os.SEEK_SET)
+				io.CopyN(writer, file, ranges[0].End-ranges[0].Start)
+				return
+			} else if ranges != nil && len(ranges) > 1 {
+				w := multipart.NewWriter(writer)
+				responseLength := int64(6 + len(w.Boundary()) + (len(w.Boundary())+len(metadata["Content-Type"])+47)*len(ranges))
+				for _, rng := range ranges {
+					responseLength += int64(len(fmt.Sprintf("%d-%d/%d", rng.Start, rng.End-1, contentLength))) + rng.End - rng.Start
+				}
+				headers.Set("Content-Length", strconv.FormatInt(responseLength, 10))
+				headers.Set("Content-Type", "multipart/byteranges;boundary="+w.Boundary())
+				writer.WriteHeader(http.StatusPartialContent)
+				for _, rng := range ranges {
+					part, _ := w.CreatePart(textproto.MIMEHeader{"Content-Type": []string{metadata["Content-Type"]},
+						"Content-Range": []string{fmt.Sprintf("bytes %d-%d/%d", rng.Start, rng.End-1, contentLength)}})
+					file.Seek(rng.Start, os.SEEK_SET)
+					io.CopyN(part, file, rng.End-rng.Start)
+				}
+				w.Close()
+				return
+			}
+		}
+	*/
+	writer.WriteHeader(http.StatusOK)
+	if request.Method == "GET" {
+		if server.checkEtags {
+			hash := md5.New()
+			hummingbird.Copy(rados_obj, writer, hash)
+			if hex.EncodeToString(hash.Sum(nil)) != metadata["ETag"] && QuarantineHash(hashDir) == nil {
+				InvalidateHash(hashDir)
+			}
+		} else {
+			io.Copy(writer, rados_obj)
+		}
+	} else {
+		writer.Write([]byte{})
+	}
+}
+
+func (server *ObjectServer) ObjGetHandlerOld(writer http.ResponseWriter, request *http.Request) {
 	vars := hummingbird.GetVars(request)
 	headers := writer.Header()
 	hashDir := ObjHashDir(vars, server.driveRoot, server.hashPathPrefix, server.hashPathSuffix)
@@ -212,37 +368,72 @@ func (server *ObjectServer) ObjGetHandler(writer http.ResponseWriter, request *h
 	}
 }
 
-func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *http.Request) {
-	vars := hummingbird.GetVars(request)
-	outHeaders := writer.Header()
-	if !hummingbird.ValidTimestamp(request.Header.Get("X-Timestamp")) {
-		http.Error(writer, "Invalid X-Timestamp header", http.StatusBadRequest)
-		return
-	}
-	if vars["obj"] == "" {
-		http.Error(writer, fmt.Sprintf("Invalid path: %s", request.URL.Path), http.StatusBadRequest)
-		return
-	}
-	if request.Header.Get("Content-Type") == "" {
-		http.Error(writer, "No content type", http.StatusBadRequest)
-		return
-	}
-	hashDir := ObjHashDir(vars, server.driveRoot, server.hashPathPrefix, server.hashPathSuffix)
+func LibradosBackendFileWriter(server *ObjectServer,
+	writer http.ResponseWriter, request *http.Request,
+	vars map[string]string, hashDir string, requestTimestamp string) {
+	//tail_object_name := hashDir + "_" + requestTimestamp
+	tail_object_name := hashDir
 
-	if deleteAt := request.Header.Get("X-Delete-At"); deleteAt != "" {
-		if deleteTime, err := hummingbird.ParseDate(deleteAt); err != nil || deleteTime.Before(time.Now()) {
-			http.Error(writer, "X-Delete-At in past", 400)
-			return
+	rados_obj := &gorados.RadosStripedObject{}
+	rados_obj.ObjectName = tail_object_name
+	rados_obj.Ioctx = server.cephCluster.Ioctx
+
+	e := rados_obj.Connect()
+	if e != nil {
+		hummingbird.StandardResponse(writer, 500)
+		return
+	}
+
+	hash := md5.New()
+	totalSize, err := hummingbird.Copy(request.Body, rados_obj, hash)
+	if err == io.ErrUnexpectedEOF {
+		hummingbird.StandardResponse(writer, 499)
+		return
+	} else if err != nil {
+		hummingbird.GetLogger(request).LogError("Error writing to striped object %s: %s", tail_object_name, err.Error())
+		hummingbird.StandardResponse(writer, http.StatusInternalServerError)
+		return
+	}
+
+	metadata := map[string]string{
+		"name":           "/" + vars["account"] + "/" + vars["container"] + "/" + vars["obj"],
+		"X-Timestamp":    requestTimestamp,
+		"Content-Type":   request.Header.Get("Content-Type"),
+		"Content-Length": strconv.FormatInt(totalSize, 10),
+		"ETag":           hex.EncodeToString(hash.Sum(nil)),
+	}
+	for key := range request.Header {
+		if allowed, ok := server.allowedHeaders[key]; (ok && allowed) ||
+			strings.HasPrefix(key, "X-Object-Meta-") ||
+			strings.HasPrefix(key, "X-Object-Sysmeta-") {
+			metadata[key] = request.Header.Get(key)
 		}
 	}
-
-	requestTimestamp, err := hummingbird.StandardizeTimestamp(request.Header.Get("X-Timestamp"))
-	if err != nil {
-		hummingbird.GetLogger(request).LogError("Error standardizing request X-Timestamp: %s", err.Error())
-		http.Error(writer, "Invalid X-Timestamp header", http.StatusBadRequest)
+	requestEtag := strings.ToLower(request.Header.Get("ETag"))
+	if requestEtag != "" && requestEtag != metadata["ETag"] {
+		http.Error(writer, "Unprocessable Entity", 422)
 		return
 	}
+	outHeaders := writer.Header()
+	outHeaders.Set("ETag", metadata["ETag"])
 
+	// TODO: write metadata to object
+	md, err := json.Marshal(metadata)
+	if err != nil {
+		hummingbird.StandardResponse(writer, 500)
+		return
+	}
+	rados_obj.Setxattr("user.swift.metadata", md)
+
+	server.containerUpdates(request, metadata, request.Header.Get("X-Delete-At"))
+	hummingbird.StandardResponse(writer, http.StatusCreated)
+}
+
+func BackendFileWriter(server *ObjectServer, writer http.ResponseWriter,
+	request *http.Request, vars map[string]string, hashDir string,
+	requestTimestamp string) {
+
+	outHeaders := writer.Header()
 	dataFile, metaFile := ObjectFiles(hashDir)
 	if dataFile != "" && !strings.HasSuffix(dataFile, ".ts") {
 		if inm := request.Header.Get("If-None-Match"); inm == "*" {
@@ -338,6 +529,40 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	}()
 	server.containerUpdates(request, metadata, request.Header.Get("X-Delete-At"))
 	hummingbird.StandardResponse(writer, http.StatusCreated)
+}
+
+func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *http.Request) {
+	vars := hummingbird.GetVars(request)
+	if !hummingbird.ValidTimestamp(request.Header.Get("X-Timestamp")) {
+		http.Error(writer, "Invalid X-Timestamp header", http.StatusBadRequest)
+		return
+	}
+	if vars["obj"] == "" {
+		http.Error(writer, fmt.Sprintf("Invalid path: %s", request.URL.Path), http.StatusBadRequest)
+		return
+	}
+	if request.Header.Get("Content-Type") == "" {
+		http.Error(writer, "No content type", http.StatusBadRequest)
+		return
+	}
+	hashDir := ObjHashDir(vars, server.driveRoot, server.hashPathPrefix, server.hashPathSuffix)
+
+	if deleteAt := request.Header.Get("X-Delete-At"); deleteAt != "" {
+		if deleteTime, err := hummingbird.ParseDate(deleteAt); err != nil || deleteTime.Before(time.Now()) {
+			http.Error(writer, "X-Delete-At in past", 400)
+			return
+		}
+	}
+
+	requestTimestamp, err := hummingbird.StandardizeTimestamp(request.Header.Get("X-Timestamp"))
+	if err != nil {
+		hummingbird.GetLogger(request).LogError("Error standardizing request X-Timestamp: %s", err.Error())
+		http.Error(writer, "Invalid X-Timestamp header", http.StatusBadRequest)
+		return
+	}
+
+	//BackendFileWriter(server, writer, request, vars, hashDir, requestTimestamp)
+	LibradosBackendFileWriter(server, writer, request, vars, hashDir, requestTimestamp)
 }
 
 func (server *ObjectServer) ObjDeleteHandler(writer http.ResponseWriter, request *http.Request) {
@@ -756,6 +981,13 @@ func GetServer(conf string, flags *flag.FlagSet) (bindIP string, bindPort int, s
 		prefix := basePrefix + ".go.objectserver"
 		go hummingbird.CollectRuntimeMetrics(statsdHost, statsdPort, statsdPause, prefix)
 	}
+
+	// configure ceph connection
+	cephConf := "/etc/ceph/ceph.conf"
+	cephPool := "test"
+
+	server.cephCluster = &gorados.RadosCluster{}
+	server.cephCluster.Connect(cephConf, cephPool)
 
 	return bindIP, bindPort, server, server.logger, nil
 }
